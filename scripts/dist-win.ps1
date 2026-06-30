@@ -22,6 +22,33 @@ Write-Host "[dist-win] building native CU helper"
 & (Join-Path $root 'native\computer-use-helper\build-win.ps1')
 if ($LASTEXITCODE -ne 0) { throw "[dist-win] helper build failed ($LASTEXITCODE)" }
 
+# The Windows terminal backend: the supermux ConPTY session-host (conpty-host.mjs drives it over host_rpc).
+# Bundled via win.extraResources at vendor/bin/session-host.exe (resolveSessionHostBin reads it at
+# process.resourcesPath/bin/session-host.exe). It is a VENDORED binary (like vendor/bin/tmux on mac): a
+# checkout already carries it, so a plain build just uses it. To REFRESH from source, set $env:SUPERMUX_REPO
+# to the supermux repo root and re-run. Self-contained (ldd: only system DLLs, no MinGW runtime).
+$sessionHost = Join-Path $root 'vendor\bin\session-host.exe'
+if ($env:SUPERMUX_REPO) {
+  Write-Host "[dist-win] building supermux session-host from $env:SUPERMUX_REPO"
+  Push-Location (Join-Path $env:SUPERMUX_REPO 'server')
+  cargo build --release --bin session-host --target x86_64-pc-windows-gnu
+  $built = Join-Path (Get-Location).Path 'target\x86_64-pc-windows-gnu\release\session-host.exe'
+  Pop-Location
+  if (-not (Test-Path $built)) { throw "[dist-win] session-host build produced no exe at $built" }
+  New-Item -ItemType Directory -Force (Split-Path $sessionHost) | Out-Null
+  Copy-Item $built $sessionHost -Force
+  Write-Host "[dist-win] vendored session-host.exe ($([math]::Round((Get-Item $sessionHost).Length/1MB,1)) MB)"
+} elseif (-not (Test-Path $sessionHost)) {
+  throw "[dist-win] vendor\bin\session-host.exe missing and SUPERMUX_REPO not set. Set `$env:SUPERMUX_REPO to the supermux repo root to build it."
+} else {
+  Write-Host "[dist-win] using vendored vendor\bin\session-host.exe (set `$env:SUPERMUX_REPO to refresh from source)"
+}
+
+# PREREQUISITE (Windows): Git for Windows must be installed on the END-USER machine. The agent runtime is
+# POSIX (claude runs wait.sh / curl / tail / cat via its Bash tool), and Claude Code makes Git Bash optional
+# (it falls back to the PowerShell tool, which cannot run that runtime). conpty-host pins the agent to Git
+# Bash (CLAUDE_CODE_GIT_BASH_PATH); document Git for Windows in the install instructions.
+
 Write-Host "[dist-win] electron-vite build"
 npm run build
 if ($LASTEXITCODE -ne 0) { throw "[dist-win] electron-vite build failed ($LASTEXITCODE)" }
