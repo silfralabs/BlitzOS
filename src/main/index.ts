@@ -2010,7 +2010,9 @@ app.whenReady().then(() => {
   const missingRuntime = (): string[] => {
     const m: string[] = []
     if (!currentAgentRuntime) m.push('an agent backend (`codex` or `claude`) — install/fix Codex or Claude Code, and make sure the command works in your terminal')
-    if (!resolveTmuxBin()) m.push('tmux — run `brew install tmux` (my agent terminals run inside it)')
+    // Windows runs agent terminals in the ConPTY session-host (conpty-host.mjs), not tmux, so tmux is not a
+    // prerequisite there; requiring it posted a false "I can't respond yet" even with a working ConPTY agent.
+    if (process.platform !== 'win32' && !resolveTmuxBin()) m.push('tmux: run `brew install tmux` (my agent terminals run inside it)')
     return m
   }
   const lastRuntimeNotice = new Map<string, number>()

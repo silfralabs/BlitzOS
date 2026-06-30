@@ -233,8 +233,13 @@ function wrapAgentCommandForPlatform(command, sessionsDir, id) {
   if (process.platform !== 'win32') return command
   const bash = resolveBashBin()
   if (!bash) return command
+  // Git Bash treats backslashes as escapes in an unquoted token, so an absolute `exec C:\...\claude.exe`
+  // collapses to `C:...claude.exe: not found`. Convert the Windows paths in the command to forward slashes,
+  // which MSYS accepts everywhere (the exec target AND the $(cat <bootstrap>) path). The only backslashes
+  // in the command are Windows paths; the args (UUID, --settings JSON) have none.
+  const posix = command.replace(/\\/g, '/')
   const launch = join(sessionDir(sessionsDir, id), 'launch.sh')
-  try { writeFileSync(launch, `#!/usr/bin/env bash\nexec ${command}\n`) } catch { return command }
+  try { writeFileSync(launch, `#!/usr/bin/env bash\nexec ${posix}\n`) } catch { return command }
   return `"${bash}" "${launch.replace(/\\/g, '/')}"`
 }
 
