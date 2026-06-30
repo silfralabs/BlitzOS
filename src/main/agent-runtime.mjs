@@ -239,7 +239,12 @@ function wrapAgentCommandForPlatform(command, sessionsDir, id) {
   // in the command are Windows paths; the args (UUID, --settings JSON) have none.
   const posix = command.replace(/\\/g, '/')
   const launch = join(sessionDir(sessionsDir, id), 'launch.sh')
-  try { writeFileSync(launch, `#!/usr/bin/env bash\nexec ${posix}\n`) } catch { return command }
+  // Pin the agent's OWN Bash tool to Git Bash: claude makes Git for Windows optional (it falls back to
+  // the PowerShell tool, which can't run the POSIX agent runtime - wait.sh / bash / tail / cat). Exported
+  // here so the exec'd claude.exe inherits them. Single-quote the bash path so its backslashes survive.
+  // Source: code.claude.com/docs/en/setup (CLAUDE_CODE_GIT_BASH_PATH, CLAUDE_CODE_USE_POWERSHELL_TOOL).
+  const pin = `export CLAUDE_CODE_GIT_BASH_PATH='${bash}'\nexport CLAUDE_CODE_USE_POWERSHELL_TOOL=0\n`
+  try { writeFileSync(launch, `#!/usr/bin/env bash\n${pin}exec ${posix}\n`) } catch { return command }
   return `"${bash}" "${launch.replace(/\\/g, '/')}"`
 }
 

@@ -221,6 +221,9 @@ if (app.isPackaged) crashReporter.start({ uploadToServer: false })
 // safety net until then.
 app.commandLine.appendSwitch('force-gpu-mem-available-mb', '6144')
 app.commandLine.appendSwitch('disable-gpu-process-crash-limit') // let the GPU recover instead of being permanently disabled after N crashes
+// Optional renderer remote-debugging port for automated UI verification (driving the chat from a test
+// harness). Off unless BLITZ_REMOTE_DEBUG_PORT is set, so normal and production launches are unaffected.
+if (process.env.BLITZ_REMOTE_DEBUG_PORT) app.commandLine.appendSwitch('remote-debugging-port', process.env.BLITZ_REMOTE_DEBUG_PORT)
 
 // Serve workspace thumbnails (rendered board snapshots, written by capturePage) to the renderer's
 // <img> over a custom protocol — main owns the bytes; the renderer just references blitz-thumb://…
