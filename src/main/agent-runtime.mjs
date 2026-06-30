@@ -206,6 +206,38 @@ export function buildAgentCommand({ runtime = AGENT_RUNTIME_CLAUDE, cmd, claudeS
   return buildClaudeCommand({ cmd: cmd || 'claude', claudeSid, mode, bootstrapFile, effort, hooks })
 }
 
+/** Resolve a POSIX shell (Git Bash) on Windows. The agent command + runtime are POSIX-shaped, so on win32
+ *  the ConPTY terminal host (which runs a program directly, no shell) must launch them under bash. Order:
+ *  BLITZ_BASH_BIN, then the standard Git-for-Windows install paths. null = not found. Cached. */
+let resolvedBash
+function resolveBashBin() {
+  if (resolvedBash !== undefined) return resolvedBash
+  const cands = [
+    process.env.BLITZ_BASH_BIN,
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe'
+  ].filter(Boolean)
+  resolvedBash = cands.find((p) => { try { return existsSync(p) } catch { return false } }) || null
+  return resolvedBash
+}
+
+/** Windows: wrap a POSIX agent command so the ConPTY terminal host can run it. The command uses
+ *  "$(cat bootstrap)" substitution and the agent then runs bash/curl/tail/wait.sh, none of which the bare
+ *  CreateProcessW path provides. Write the command to a per-session launcher script and return a
+ *  `bash <script>` command (TWO clean tokens, so the host's whitespace/quote tokenizer can't mangle it);
+ *  `exec` makes the agent the pane process. Validated on Windows: MSYS `cat` reads the backslash bootstrap
+ *  path and claude.exe resolves under Git Bash. No-op off win32; if Git Bash is absent the command passes
+ *  through unchanged (it fails visibly rather than being silently mangled). */
+function wrapAgentCommandForPlatform(command, sessionsDir, id) {
+  if (process.platform !== 'win32') return command
+  const bash = resolveBashBin()
+  if (!bash) return command
+  const launch = join(sessionDir(sessionsDir, id), 'launch.sh')
+  try { writeFileSync(launch, `#!/usr/bin/env bash\nexec ${command}\n`) } catch { return command }
+  return `"${bash}" "${launch.replace(/\\/g, '/')}"`
+}
+
 /** Has claude ALREADY created this conversation on disk? claude writes `<configDir>/projects/<encoded-cwd>/
  *  <session-id>.jsonl` (encoded-cwd = the workspace path with every `/` and `.` turned into `-`; we don't
  *  relocate CLAUDE_CONFIG_DIR, so configDir defaults to ~/.claude). The session-id is a UUID, so a hit is
@@ -283,14 +315,14 @@ export function prepareAgentLaunch({ sessionsDir, id, url, cmd, runtime = AGENT_
     agentSessionId,
     claudeSessionId: claudeState.claudeSessionId,
     established: claudeState.established, // surfaced so the re-exec path persists the (possibly rotated) id + correct established flag
-    command: buildAgentCommand({
+    command: wrapAgentCommandForPlatform(buildAgentCommand({
       runtime: agentRuntime,
       cmd: cmd || (agentRuntime === AGENT_RUNTIME_CODEX_SERVERLESS ? 'codex' : 'claude'),
       claudeSid: claudeState.claudeSessionId,
       mode: claudeState.established ? 'resume' : 'create',
       bootstrapFile: file,
       effort
-    })
+    }), sessionsDir, id)
   }
 }
 
