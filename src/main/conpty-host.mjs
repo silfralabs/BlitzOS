@@ -22,6 +22,9 @@
 import net from 'node:net'
 import { randomUUID } from 'node:crypto'
 import { StringDecoder } from 'node:string_decoder'
+import { spawn as cpSpawn } from 'node:child_process' // aliased: createConptyHost has its own spawn() method
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 
 const PROTOCOL_VERSION = 1
 const MAX_FRAME = 16 * 1024 * 1024
@@ -45,6 +48,20 @@ export function resolveHostId(cfg = {}) {
 export const controlPipeName = (hostId) => `\\\\.\\pipe\\supermux-host-${hostId}-v${PROTOCOL_VERSION}`
 // Per-subscription RAW byte stream pipe (host_rpc.rs:44). The host serves this after a Subscribe ack.
 const streamPipeName = (token) => `\\\\.\\pipe\\supermux-stream-${token}`
+
+/** Locate the session-host binary to auto-spawn when none is running: BLITZ_SESSION_HOST_BIN wins (dev
+ *  override), then the packaged Resources/bin/session-host.exe (electron-builder extraResources). null =
+ *  nothing to spawn, so start() degrades (like tmux-host with no tmux binary). Cached. */
+let resolvedHostBin
+function resolveSessionHostBin() {
+  if (resolvedHostBin !== undefined) return resolvedHostBin
+  const cands = [
+    process.env.BLITZ_SESSION_HOST_BIN,
+    typeof process.resourcesPath === 'string' ? join(process.resourcesPath, 'bin', 'session-host.exe') : null
+  ].filter(Boolean)
+  resolvedHostBin = cands.find((p) => { try { return existsSync(p) } catch { return false } }) || null
+  return resolvedHostBin
+}
 
 // ---- the RPC client: one control connection, FIFO request/response, reconnect-once on IO error ----
 class HostRpc {
@@ -267,11 +284,31 @@ export function createConptyHost(cfg = {}) {
 
   // ---- interface (matches tmux-host.d.mts TmuxHost) ----
 
+  // Ensure a session-host is reachable: connect if one already runs (a prior BlitzOS run left it detached,
+  // OR supermux runs one), else spawn the binary DETACHED so it OUTLIVES BlitzOS (that is what makes
+  // sessions survive a restart), with SUPERMUX_HOST_ID pinned so its pipe name matches ours. Resolves
+  // true once connected; false (degraded) when no host runs and no binary is bundled.
+  async function ensureHostRunning() {
+    try { await rpc._connect(); return true } catch { /* none running; try to spawn one */ }
+    const bin = resolveSessionHostBin()
+    if (!bin) return false
+    try {
+      const child = cpSpawn(bin, [], { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, SUPERMUX_HOST_ID: HOST_ID } })
+      child.unref()
+    } catch (e) { console.error('[conpty-host] failed to spawn session-host:', e?.message || e); return false }
+    for (let i = 0; i < 30; i++) { // wait for it to listen on the pipe (150ms x 30 = 4.5s budget)
+      await new Promise((r) => setTimeout(r, 150))
+      try { await rpc._connect(); return true } catch { /* not listening yet */ }
+    }
+    return false
+  }
+
   function start() {
     if (ready) return ready
-    ready = rpc._connect().then(() => { startPoll() }).catch((e) => {
-      // DEGRADE like tmux-host when tmux is missing: log, leave ready resolved, ops below no-op.
-      console.error('[conpty-host] session-host unavailable:', e?.message || e)
+    ready = ensureHostRunning().then((ok) => {
+      if (ok) startPoll()
+      // DEGRADE like tmux-host when tmux is missing: leave ready resolved, ops below no-op against null sock.
+      else console.error('[conpty-host] session-host unavailable (no running host, no bundled binary to spawn)')
     })
     return ready
   }
