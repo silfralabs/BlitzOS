@@ -403,7 +403,10 @@ export function createConptyHost(cfg = {}) {
       rec._detaching = true
       if (rec.stream) { try { rec.stream.destroy() } catch { /* ignore */ } rec.stream = null }
     }
-    rpc.close()
+    // Drain any in-flight request (a just-fired fire-and-forget kill) BEFORE closing the control socket,
+    // so a kill()-then-stop() sequence cannot abort the kill mid-send (which left stale sessions in the
+    // host). The chain always settles (request() swallows rejections), so close still runs.
+    rpc.chain.finally(() => rpc.close())
   }
   // No kill-all RPC in v1: enumerate and kill each. (A Request::Shutdown is a possible later add.)
   function killServer() {
