@@ -221,6 +221,9 @@ if (app.isPackaged) crashReporter.start({ uploadToServer: false })
 // safety net until then.
 app.commandLine.appendSwitch('force-gpu-mem-available-mb', '6144')
 app.commandLine.appendSwitch('disable-gpu-process-crash-limit') // let the GPU recover instead of being permanently disabled after N crashes
+// Optional renderer remote-debugging port for automated UI verification (driving the chat from a test
+// harness). Off unless BLITZ_REMOTE_DEBUG_PORT is set, so normal and production launches are unaffected.
+if (process.env.BLITZ_REMOTE_DEBUG_PORT) app.commandLine.appendSwitch('remote-debugging-port', process.env.BLITZ_REMOTE_DEBUG_PORT)
 
 // Serve workspace thumbnails (rendered board snapshots, written by capturePage) to the renderer's
 // <img> over a custom protocol — main owns the bytes; the renderer just references blitz-thumb://…
@@ -1097,6 +1100,40 @@ app.whenReady().then(() => {
   //  - os:notch-geometry → push the menu-bar height (the notch height) to the renderer
   //  - ⌥Space → os:notch-toggle (the renderer toggles expand/collapse)
   // The standalone island.ts window + the native BlitzIsland.app (BLITZ_NATIVE_ISLAND, wired below) are retired/legacy.
+  // Session-spawn handlers, registered on EVERY platform (they only spawn agents / seed messages and touch no
+  // notch overlay window). This is what makes the pen "new session" button + the island composer work on
+  // Windows, where the notch overlay wiring below (interactive/geometry/hit-window) stays macOS-only.
+  // Deep ON = an orchestrated workflow (electronOps.startWorkflow); Deep OFF = a peer agent (spawnAgent)
+  // seeded with the prompt (userMessage writes chat.md + wakes). electronOps is typed loosely; cast per call.
+  ipcMain.handle('os:notch-send', (_e, payload: { prompt?: unknown; deep?: unknown }) => {
+    const prompt = String(payload?.prompt ?? '').trim()
+    if (!prompt) return { ok: false, error: 'empty prompt' }
+    try {
+      if (payload?.deep) {
+        const r = (electronOps.startWorkflow as unknown as (s: { task: string; contextRefs?: string[]; title?: string }) => { ok?: boolean; agent?: { id: string; title?: string }; error?: string })({ task: prompt, contextRefs: [], title: undefined })
+        if (r?.agent?.id) electronConnections.connectionReassign(String(r.agent.id), '')
+        if (r?.agent?.id && r.ok !== false) trackActivity('agent.spawned', { agentId: r.agent.id, source: 'main' })
+        return r && r.ok !== false ? { ok: true, id: r.agent?.id ?? null } : { ok: false, error: r?.error || 'startWorkflow failed' }
+      }
+      const a = (electronOps.spawnAgent as unknown as (title?: string) => { id: string; title: string })(undefined)
+      electronConnections.connectionReassign(String(a.id), '')
+      try { (electronOps.userMessage as unknown as (text: string, agentId?: string) => void)(prompt, a.id) } catch { /* seeds when chat.md is read */ }
+      trackActivity('agent.spawned', { agentId: a.id, source: 'main' })
+      return { ok: true, id: a.id }
+    } catch (e) {
+      return { ok: false, error: (e as Error)?.message || 'send threw' }
+    }
+  })
+  // Pen "new session" button: spawn a fresh agent immediately (no prompt seeded); the renderer jumps to its tab.
+  ipcMain.handle('os:notch-new-agent', () => {
+    try {
+      const a = (electronOps.spawnAgent as unknown as (title?: string) => { id: string; title: string })(undefined)
+      trackActivity('agent.spawned', { agentId: a.id, source: 'main' })
+      return { ok: true, id: a.id }
+    } catch (e) {
+      return { ok: false, error: (e as Error)?.message || 'spawn threw' }
+    }
+  })
   if (notchGated) {
     let notchGeom: NotchGeometry | null = null
     let notchHitWin: BrowserWindow | null = null
@@ -1112,43 +1149,9 @@ app.whenReady().then(() => {
         if (notchHitWin && !notchHitWin.isDestroyed()) notchHitWin.setIgnoreMouseEvents(notchOverlayInteractive, { forward: true })
       } catch { /* mid-teardown */ }
     })
-    // Deep ON → an orchestrated workflow (electronOps.startWorkflow). Deep OFF → a conversational peer agent
-    // (electronOps.spawnAgent) seeded with the prompt (electronOps.userMessage WRITES chat.md + wakes). electronOps
-    // is typed Record<string,(...args:never[])=>unknown>; cast each to its real signature at this one call site.
-    ipcMain.handle('os:notch-send', (_e, payload: { prompt?: unknown; deep?: unknown }) => {
-      const prompt = String(payload?.prompt ?? '').trim()
-      if (!prompt) return { ok: false, error: 'empty prompt' }
-      // Sources attached on the new-session composer are owned by '' (the pre-spawn bucket). When the agent spawns,
-      // reassign them to it: it now OWNS them (connection_list scopes per chat) and is WOKEN about each (the moments
-      // connectionReassign emits) — no need to dump connIds into the user's message; the UI shows them as chips.
-      try {
-        if (payload?.deep) {
-          const r = (electronOps.startWorkflow as unknown as (s: { task: string; contextRefs?: string[]; title?: string }) => { ok?: boolean; agent?: { id: string; title?: string }; error?: string })({ task: prompt, contextRefs: [], title: undefined })
-          if (r?.agent?.id) electronConnections.connectionReassign(String(r.agent.id), '')
-          if (r?.agent?.id && r.ok !== false) trackActivity('agent.spawned', { agentId: r.agent.id, source: 'main' })
-          return r && r.ok !== false ? { ok: true, id: r.agent?.id ?? null } : { ok: false, error: r?.error || 'startWorkflow failed' }
-        }
-        const a = (electronOps.spawnAgent as unknown as (title?: string) => { id: string; title: string })(undefined)
-        electronConnections.connectionReassign(String(a.id), '')
-        try { (electronOps.userMessage as unknown as (text: string, agentId?: string) => void)(prompt, a.id) } catch { /* seeds when chat.md is read */ }
-        trackActivity('agent.spawned', { agentId: a.id, source: 'main' })
-        return { ok: true, id: a.id }
-      } catch (e) {
-        return { ok: false, error: (e as Error)?.message || 'send threw' }
-      }
-    })
-    // Pen "new session" button: spawn a fresh agent IMMEDIATELY (no prompt seeded) and return its id; the renderer
-    // jumps to its tab. The user then types/attaches in the live chat — attachments scope to this agent, so there
-    // is no pre-spawn '' bucket to reassign (unlike the retired type-to-spawn composer).
-    ipcMain.handle('os:notch-new-agent', () => {
-      try {
-        const a = (electronOps.spawnAgent as unknown as (title?: string) => { id: string; title: string })(undefined)
-        trackActivity('agent.spawned', { agentId: a.id, source: 'main' })
-        return { ok: true, id: a.id }
-      } catch (e) {
-        return { ok: false, error: (e as Error)?.message || 'spawn threw' }
-      }
-    })
+    // os:notch-send + os:notch-new-agent are registered UNCONDITIONALLY above this block (they only spawn
+    // agents / seed messages and touch no notch window), so the pen "new session" button and the composer
+    // work on Windows too, not just the macOS island.
     // Push the notch geometry (the menu-bar height the renderer uses as the notch height) once the renderer is up
     // and on display changes; the renderer already knows the screen size from its own full-display window.
     // The BULLETPROOF notch toggle: a tiny always-interactive transparent window placed EXACTLY over the physical
@@ -2010,7 +2013,9 @@ app.whenReady().then(() => {
   const missingRuntime = (): string[] => {
     const m: string[] = []
     if (!currentAgentRuntime) m.push('an agent backend (`codex` or `claude`) — install/fix Codex or Claude Code, and make sure the command works in your terminal')
-    if (!resolveTmuxBin()) m.push('tmux — run `brew install tmux` (my agent terminals run inside it)')
+    // Windows runs agent terminals in the ConPTY session-host (conpty-host.mjs), not tmux, so tmux is not a
+    // prerequisite there; requiring it posted a false "I can't respond yet" even with a working ConPTY agent.
+    if (process.platform !== 'win32' && !resolveTmuxBin()) m.push('tmux: run `brew install tmux` (my agent terminals run inside it)')
     return m
   }
   const lastRuntimeNotice = new Map<string, number>()

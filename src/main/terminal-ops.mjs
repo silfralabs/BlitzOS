@@ -6,6 +6,7 @@
 // the seam: getWorkspacePath (server: wsHost.activePath; Electron: osWorkspaceContext().workspace_path)
 // and emit (server: SSE broadcast; Electron: webContents.send 'os:action'). Same makeOsTools(ops) pattern.
 import { createTmuxHost, tmuxAvailable } from './tmux-host.mjs'
+import { createConptyHost } from './conpty-host.mjs'
 import { createTerminalManager } from './terminal-manager.mjs'
 import { prepareAgentLaunch } from './agent-runtime.mjs'
 import { markWrite as defaultMarkWrite } from './workspace.mjs'
@@ -30,9 +31,14 @@ export function makeTerminalOps({ getWorkspacePath, emit = () => {}, markWrite =
     // silent ENOENT when tmux isn't installed / bundled.
     if (!preflighted) {
       preflighted = true
-      const v = tmuxAvailable()
-      if (v) console.log('[terminal-ops] terminals backed by', v)
-      else console.error('[terminal-ops] tmux NOT found — terminals need tmux. Install (apk add tmux / brew install tmux) or set BLITZ_TMUX_BIN to a bundled binary.')
+      // Windows uses the ConPTY session-host (conpty-host.mjs), not tmux, so skip the tmux preflight there.
+      if (process.platform === 'win32') {
+        console.log('[terminal-ops] terminals backed by supermux-session-host (ConPTY over host_rpc)')
+      } else {
+        const v = tmuxAvailable()
+        if (v) console.log('[terminal-ops] terminals backed by', v)
+        else console.error('[terminal-ops] tmux NOT found. Terminals need tmux. Install (apk add tmux / brew install tmux) or set BLITZ_TMUX_BIN to a bundled binary.')
+      }
     }
     // Keep ONLY the active workspace's manager live — evict the rest (their tmux sessions survive in
     // their own servers; restore() re-adopts them if that workspace is re-activated). Bounds the leak
@@ -54,7 +60,10 @@ export function makeTerminalOps({ getWorkspacePath, emit = () => {}, markWrite =
         const legacyDir = join(wsPath, '.blitzos', 'sessions')
         if (!existsSync(terminalsDir) && existsSync(legacyDir)) renameSync(legacyDir, terminalsDir)
       } catch { /* best-effort; the manager creates terminalsDir on first write if this didn't run */ }
-      const host = createTmuxHost({ socketPath: join(tmuxDir, 'server.sock') })
+      // Windows: drive the ConPTY session-host over host_rpc (same TmuxHost interface), not tmux.
+      const host = process.platform === 'win32'
+        ? createConptyHost({})
+        : createTmuxHost({ socketPath: join(tmuxDir, 'server.sock') })
       const mgr = createTerminalManager({
         host,
         terminalsDir,

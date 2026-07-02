@@ -1199,6 +1199,11 @@ let pathPatched = false
 export function ensureFullPath(): void {
   if (pathPatched) return
   pathPatched = true
+  // Windows: the unix login-shell PATH probe + the colon split/join below would MANGLE PATH (a Windows
+  // PATH is `;`-separated and every `C:\...` entry contains a colon). The Windows CLI installers already
+  // put their dir (e.g. ~/.local/bin) on PATH, and resolveCli probes it directly + via `where`, so no
+  // PATH munging is needed here.
+  if (process.platform === 'win32') return
   let login: string | null = null
   try {
     // NON-interactive login shell (-lc), deliberately NOT -lic: an interactive shell runs the user's FULL ~/.zshrc,
@@ -1224,23 +1229,36 @@ export function ensureFullPath(): void {
 // login-non-interactive `command -v` missed: the Claude Code installer puts the launcher at ~/.local/bin/<bin>.
 function resolveCli(bin: 'claude' | 'codex'): string | null {
   const home = app.getPath('home')
-  const candidates = [
-    join(home, '.local', 'bin', bin),
-    `/opt/homebrew/bin/${bin}`,
-    `/usr/local/bin/${bin}`,
-    join(home, '.claude', 'local', bin),
-    join(home, '.npm-global', 'bin', bin)
-  ]
-  for (const c of candidates) {
-    // accessSync(X_OK), not existsSync: a present-but-non-executable file would otherwise be reported "installed"
-    // and then EACCES at spawn. This also follows symlinks (a broken ~/.local/bin/<bin> link → throws → skipped).
-    try { accessSync(c, constants.X_OK); return c } catch { /* missing or not executable — skip */ }
+  const isWin = process.platform === 'win32'
+  // On Windows the launcher is `<bin>.exe` (or a .cmd/.bat shim), installed under ~/.local/bin by the
+  // Claude/Codex installers; on unix it is the bare name under the dirs below.
+  const exts = isWin ? ['.exe', '.cmd', '.bat', ''] : ['']
+  const bases = isWin
+    ? [join(home, '.local', 'bin', bin), join(home, 'AppData', 'Local', 'Programs', bin, bin), join(home, '.npm-global', bin)]
+    : [
+        join(home, '.local', 'bin', bin),
+        `/opt/homebrew/bin/${bin}`,
+        `/usr/local/bin/${bin}`,
+        join(home, '.claude', 'local', bin),
+        join(home, '.npm-global', 'bin', bin)
+      ]
+  for (const base of bases) {
+    for (const ext of exts) {
+      const c = base + ext
+      // accessSync(X_OK) on unix rejects a present-but-non-executable file (which would then EACCES at
+      // spawn) and follows symlinks; Windows has no execute bit, so F_OK (existence) is the right probe.
+      try { accessSync(c, isWin ? constants.F_OK : constants.X_OK); return c } catch { /* missing or not executable: skip */ }
+    }
   }
   try {
-    const out = execFileSync('/bin/zsh', ['-lc', `command -v ${bin}`], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
-    if (out.startsWith('/') && existsSync(out)) return out
+    // Last resort: ask the OS. `where <bin>.exe` on Windows (first match), a non-interactive login shell's
+    // `command -v` on unix (so a non-standard install location is still found).
+    const out = isWin
+      ? execFileSync('where', [`${bin}.exe`], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] }).trim().split(/\r?\n/)[0]
+      : execFileSync('/bin/zsh', ['-lc', `command -v ${bin}`], { encoding: 'utf8', timeout: 8000, stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    if (out && existsSync(out)) return out
   } catch {
-    /* not found via shell */
+    /* not found via shell / where */
   }
   return null
 }

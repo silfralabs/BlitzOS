@@ -74,6 +74,13 @@ win:
   extraResources:
     - from: native/computer-use-helper/build/blitz-cu-helper.exe
       to: blitz-cu-helper.exe
+    # The supermux ConPTY session-host: the Windows terminal backend that conpty-host.mjs drives over
+    # host_rpc. resolveSessionHostBin looks for it at process.resourcesPath/bin/session-host.exe, so it
+    # maps to bin/session-host.exe here. Built by dist-win.ps1 (cargo --release, windows-gnu) into
+    # vendor/bin/session-host.exe. Self-contained: ldd shows only system DLLs (ucrtbase etc.), no MinGW
+    # runtime, so it runs on a clean Win10 1809+ box with no extra install.
+    - from: vendor/bin/session-host.exe
+      to: bin/session-host.exe
     # cross-platform analytics config; skipped when absent (local/fork builds)
     - from: build-config/activity-logging.json
       to: activity-logging.json
